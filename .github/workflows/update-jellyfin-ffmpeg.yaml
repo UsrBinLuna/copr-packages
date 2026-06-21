@@ -16,7 +16,7 @@ jobs:
     steps:
       - name: Install dependencies
         run: |
-          dnf install -y git jq curl rpm-build rpmdevtools
+          dnf install -y git jq curl rpm-build rpmdevtools copr-cli
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -82,9 +82,10 @@ jobs:
 
       - name: Submit build to Copr
         if: steps.version_check.outputs.updated == 'true'
-        uses: cloud-annotations/copr-action@v1
-        with:
-          copr_user: lunaoss
-          copr_project: jellyfin-ffmpeg
-          srpm: output/*.src.rpm
-          copr_config: ${{ secrets.COPR_CONFIG }}
+        env:
+          COPR_CREDENTIALS: ${{ secrets.COPR_CONFIG }}
+        run: |
+          mkdir -p ~/.config
+          echo "$COPR_CREDENTIALS" > ~/.config/copr
+          
+          copr-cli build jellyfin-ffmpeg output/*.src.rpm

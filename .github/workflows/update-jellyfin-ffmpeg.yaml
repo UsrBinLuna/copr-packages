@@ -1,0 +1,90 @@
+name: Auto-update Jellyfin FFmpeg to Copr
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+
+    steps:
+      - name: Install dependencies
+        run: |
+          dnf install -y git jq curl rpm-build rpmdevtools
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for new upstream version
+        id: version_check
+        run: |
+          LATEST_TAG=$(curl -s https://api.github.com/repos/jellyfin/jellyfin-ffmpeg/releases/latest | jq -r '.tag_name')
+          
+          if [[ $LATEST_TAG =~ v([0-9.]+)-([0-9]+) ]]; then
+            UPSTREAM_VERSION="${BASH_REMATCH[1]}"
+            PATCHSET_RELEASE="${BASH_REMATCH[2]}"
+          else
+            echo "Failed to parse version tag from GitHub API."
+            exit 1
+          fi
+          
+          SPEC_FILE="jellyfin-ffmpeg/jellyfin-ffmpeg.spec" 
+          CURRENT_VERSION=$(grep '%global ffmpeg_version' $SPEC_FILE | awk '{print $3}')
+          CURRENT_PATCHSET=$(grep '%global patchset_release' $SPEC_FILE | awk '{print $3}')
+          
+          echo "Upstream: $UPSTREAM_VERSION (Patchset $PATCHSET_RELEASE)"
+          echo "Local Spec: $CURRENT_VERSION (Patchset $CURRENT_PATCHSET)"
+          
+          if [ "$UPSTREAM_VERSION" != "$CURRENT_VERSION" ] || [ "$PATCHSET_RELEASE" != "$CURRENT_PATCHSET" ]; then
+            echo "New version detected! Updating spec file..."
+            
+            sed -i "s/%global ffmpeg_version .*/%global ffmpeg_version $UPSTREAM_VERSION/" $SPEC_FILE
+            sed -i "s/%global patchset_release .*/%global patchset_release $PATCHSET_RELEASE/" $SPEC_FILE
+            
+            CURRENT_DATE=$(date "+%a %b %d %Y")
+            CHANGELOG_ENTRY="* $CURRENT_DATE GitHub Actions <actions@github.com> - ${UPSTREAM_VERSION}-${PATCHSET_RELEASE}.1\n- Automatic update to upstream release ${LATEST_TAG}"
+            sed -i "/%changelog/a $CHANGELOG_ENTRY\n" $SPEC_FILE
+            
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "tag=$LATEST_TAG" >> $GITHUB_OUTPUT
+          else
+            echo "Everything is up to date."
+            echo "updated=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit changes to GitHub
+        if: steps.version_check.outputs.updated == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add jellyfin-ffmpeg/jellyfin-ffmpeg.spec
+          git commit -m "Update jellyfin-ffmpeg to ${{ steps.version_check.outputs.tag }}"
+          git push
+
+      - name: Build Source RPM (SRPM)
+        if: steps.version_check.outputs.updated == 'true'
+        run: |
+          rpmdev-setuptree
+          cp jellyfin-ffmpeg/jellyfin-ffmpeg.spec ~/rpmbuild/SPECS/
+          
+          spectool -g -R ~/rpmbuild/SPECS/jellyfin-ffmpeg.spec
+          
+          rpmbuild -bs ~/rpmbuild/SPECS/jellyfin-ffmpeg.spec
+          
+          mkdir -p output
+          mv ~/rpmbuild/SRPMS/*.src.rpm output/
+
+      - name: Submit build to Copr
+        if: steps.version_check.outputs.updated == 'true'
+        uses: cloud-annotations/copr-action@v1
+        with:
+          copr_user: lunaoss
+          copr_project: jellyfin-ffmpeg
+          srpm: output/*.src.rpm
+          copr_config: ${{ secrets.COPR_CONFIG }}
